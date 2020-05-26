@@ -220,7 +220,7 @@ func handleUDP(app *config, wg *sync.WaitGroup, conn *net.UDPConn) {
 		}
 		//log.Printf(" === recv n: %v", n)
 		if n == 3 && string(buf[:n]) == strSignal {
-			log.Printf(" ============b %v -> %v, + %v ===c %v -> %v, + %v",
+			log.Printf(" received bytes: %v -> %v, + %v . received packet: %v -> %v, + %v",
 				last.recvBytes, ac.recvBytes, ac.recvBytes-last.recvBytes,
 				last.recvCount, ac.recvCount, ac.recvCount-last.recvCount)
 			last = ac
