@@ -97,7 +97,7 @@ func listenUDP(app *config, wg *sync.WaitGroup, h string) {
 	}
 
 	wg.Add(2)
-	go handleUDPTimer(app, wg)
+	go runUDPTimer(app, wg)
 	go handleUDP(app, wg, conn)
 }
 
@@ -149,23 +149,22 @@ type udpInfo struct {
 	id     int
 }
 
-var timerReset int64
+var idleCount int32
 
 type myAccount struct {
 	recvCount int64
 	recvBytes int64
 }
 
-const strSignal = "@*@"
+var printSignal = []byte("@*@")
 
-func handleUDPTimer(app *config, wg *sync.WaitGroup) {
+func runUDPTimer(app *config, wg *sync.WaitGroup) {
 	defer wg.Done()
-	timerReset = int64(time.Now().Second())
 
 	serverAddr := "127.0.0.1" + app.defaultPort
 	conn, err := net.Dial("udp", serverAddr)
 	if err != nil {
-		log.Printf("UDPTimer: net.Dial %s error: %v", serverAddr, err)
+		log.Printf("runUDPTimer: net.Dial %s error: %v", serverAddr, err)
 		return
 	}
 	defer conn.Close()
@@ -173,22 +172,10 @@ func handleUDPTimer(app *config, wg *sync.WaitGroup) {
 	for {
 		time.Sleep(2000 * time.Millisecond)
 
-		/*
-			t1 := atomic.LoadInt64(&timerReset)
-			t2 := int64(time.Now().Second()) - t1
-			log.Printf("UDPTimer: t2 %v", t2)
-			// t2 > 3, t2 < 6
-			if t2 <= 4 || t2 > 7 {
-				log.Printf("UDPTimer: skip %v", t2)
-				continue
-			}
-		*/
-		v := atomic.AddInt64(&timerReset, 1)
-		if v == 2 {
-			toWrite := []byte(strSignal)
-			_, err = conn.Write(toWrite)
+		if atomic.AddInt32(&idleCount, 1) == 2 {
+			_, err = conn.Write(printSignal)
 			if err != nil {
-				log.Printf("UDPTimer: conn.Write error: %v", err)
+				log.Printf("runUDPTimer: conn.Write error: %v", err)
 				continue
 			}
 		}
@@ -199,89 +186,40 @@ func handleUDPTimer(app *config, wg *sync.WaitGroup) {
 func handleUDP(app *config, wg *sync.WaitGroup, conn *net.UDPConn) {
 	defer wg.Done()
 
-	tab := map[string]*udpInfo{}
-
 	buf := make([]byte, app.opt.ReadSize)
-
-	var aggReader aggregate
-	var aggWriter aggregate
-
-	var idCount int
 
 	ac := myAccount{}
 	last := myAccount{}
 
 	for {
-		var info *udpInfo
 		n, src, errRead := conn.ReadFromUDP(buf)
 		if src == nil {
 			log.Printf("handleUDP: read nil src: error: %v", errRead)
 			continue
 		}
-		//log.Printf(" === recv n: %v", n)
-		if n == 3 && string(buf[:n]) == strSignal {
-			log.Printf(" received bytes: %v -> %v, + %v . received packet: %v -> %v, + %v",
-				last.recvBytes, ac.recvBytes, ac.recvBytes-last.recvBytes,
-				last.recvCount, ac.recvCount, ac.recvCount-last.recvCount)
+		if n == len(printSignal) && bytes.Compare(buf[:n], printSignal) == 0 {
+			rc := ac.recvCount - last.recvCount
+			rb := ac.recvBytes - last.recvBytes
+			var bp int64
+			if rc > 0 {
+				bp = rb / rc
+			}
+			log.Printf(" received pkts: %8v -> %8v = %8v | received packet: %8v -> %8v = %8v | b/p = %v",
+				last.recvCount, ac.recvCount, rc,
+				last.recvBytes, ac.recvBytes, rb,
+				bp)
+			/*
+				log.Printf(" received bytes: %v -> %v, + %v. received packet: %v -> %v, + %v",
+					last.recvBytes, ac.recvBytes, ac.recvBytes-last.recvBytes,
+					last.recvCount, ac.recvCount, ac.recvCount-last.recvCount)
+			*/
 			last = ac
 			continue
 		}
-		//atomic.StoreInt64(&timerReset, int64(time.Now().Second()))
-		atomic.StoreInt64(&timerReset, 0)
+
 		ac.recvCount++
 		ac.recvBytes += int64(n)
-
-		if n < 400 {
-			continue
-		}
-		log.Printf("handleUDP: incoming: %v", src)
-
-		var found bool
-		info, found = tab[src.String()]
-		if !found {
-			log.Printf("handleUDP: incoming: %v", src)
-
-			info = &udpInfo{
-				remote: src,
-				acc:    &account{},
-				start:  time.Now(),
-				id:     idCount,
-			}
-			idCount++
-			info.acc.prevTime = info.start
-			tab[src.String()] = info
-
-			dec := gob.NewDecoder(bytes.NewBuffer(buf[:n]))
-			if errOpt := dec.Decode(&info.opt); errOpt != nil {
-				log.Printf("handleUDP: options failure: %v", errOpt)
-				continue
-			}
-			log.Printf("handleUDP: options received: %v", info.opt)
-
-			if !info.opt.PassiveServer {
-				opt := info.opt // copy for gorouting
-				go serverWriterTo(conn, opt, src, info.acc, info.id, 0, &aggWriter)
-			}
-
-			continue
-		}
-
-		connIndex := fmt.Sprintf("%d/%d", info.id, 0)
-
-		if errRead != nil {
-			log.Printf("handleUDP: %s read error: %s: %v", connIndex, src, errRead)
-			continue
-		}
-
-		if time.Since(info.start) > info.opt.TotalDuration {
-			log.Printf("handleUDP: total duration %s timer: %s", info.opt.TotalDuration, src)
-			info.acc.average(info.start, connIndex, "handleUDP", "rcv/s", &aggReader)
-			log.Printf("handleUDP: FIXME: remove idle udp entry from udp table")
-			continue
-		}
-
-		// account read from UDP socket
-		info.acc.update(n, info.opt.ReportInterval, connIndex, "handleUDP", "rcv/s", nil)
+		atomic.StoreInt32(&idleCount, 0)
 	}
 }
 
