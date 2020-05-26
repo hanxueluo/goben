@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,7 +29,7 @@ func serve(app *config) {
 
 	for _, h := range app.listeners {
 		hh := appendPortIfMissing(h, app.defaultPort)
-		listenTCP(app, &wg, hh)
+		//listenTCP(app, &wg, hh)
 		listenUDP(app, &wg, hh)
 	}
 
@@ -95,7 +96,8 @@ func listenUDP(app *config, wg *sync.WaitGroup, h string) {
 		return
 	}
 
-	wg.Add(1)
+	wg.Add(2)
+	go handleUDPTimer(app, wg)
 	go handleUDP(app, wg, conn)
 }
 
@@ -147,6 +149,53 @@ type udpInfo struct {
 	id     int
 }
 
+var timerReset int64
+
+type myAccount struct {
+	recvCount int64
+	recvBytes int64
+}
+
+const strSignal = "@*@"
+
+func handleUDPTimer(app *config, wg *sync.WaitGroup) {
+	defer wg.Done()
+	timerReset = int64(time.Now().Second())
+
+	serverAddr := "127.0.0.1" + app.defaultPort
+	conn, err := net.Dial("udp", serverAddr)
+	if err != nil {
+		log.Printf("UDPTimer: net.Dial %s error: %v", serverAddr, err)
+		return
+	}
+	defer conn.Close()
+
+	for {
+		time.Sleep(2000 * time.Millisecond)
+
+		/*
+			t1 := atomic.LoadInt64(&timerReset)
+			t2 := int64(time.Now().Second()) - t1
+			log.Printf("UDPTimer: t2 %v", t2)
+			// t2 > 3, t2 < 6
+			if t2 <= 4 || t2 > 7 {
+				log.Printf("UDPTimer: skip %v", t2)
+				continue
+			}
+		*/
+		v := atomic.AddInt64(&timerReset, 1)
+		if v == 2 {
+			toWrite := []byte(strSignal)
+			_, err = conn.Write(toWrite)
+			if err != nil {
+				log.Printf("UDPTimer: conn.Write error: %v", err)
+				continue
+			}
+		}
+	}
+
+}
+
 func handleUDP(app *config, wg *sync.WaitGroup, conn *net.UDPConn) {
 	defer wg.Done()
 
@@ -159,6 +208,9 @@ func handleUDP(app *config, wg *sync.WaitGroup, conn *net.UDPConn) {
 
 	var idCount int
 
+	ac := myAccount{}
+	last := myAccount{}
+
 	for {
 		var info *udpInfo
 		n, src, errRead := conn.ReadFromUDP(buf)
@@ -166,6 +218,24 @@ func handleUDP(app *config, wg *sync.WaitGroup, conn *net.UDPConn) {
 			log.Printf("handleUDP: read nil src: error: %v", errRead)
 			continue
 		}
+		//log.Printf(" === recv n: %v", n)
+		if n == 3 && string(buf[:n]) == strSignal {
+			log.Printf(" ============b %v -> %v, + %v ===c %v -> %v, + %v",
+				last.recvBytes, ac.recvBytes, ac.recvBytes-last.recvBytes,
+				last.recvCount, ac.recvCount, ac.recvCount-last.recvCount)
+			last = ac
+			continue
+		}
+		//atomic.StoreInt64(&timerReset, int64(time.Now().Second()))
+		atomic.StoreInt64(&timerReset, 0)
+		ac.recvCount++
+		ac.recvBytes += int64(n)
+
+		if n < 400 {
+			continue
+		}
+		log.Printf("handleUDP: incoming: %v", src)
+
 		var found bool
 		info, found = tab[src.String()]
 		if !found {
