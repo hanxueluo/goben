@@ -204,7 +204,7 @@ func handleUDP(app *config, wg *sync.WaitGroup, conn *net.UDPConn) {
 			if rc > 0 {
 				bp = rb / rc
 			}
-			log.Printf(" received pkts: %8v -> %8v = %8v | received packet: %8v -> %8v = %8v | b/p = %v",
+			log.Printf(" received pkts: %8v -> %8v = %8v | received bytes: %8v -> %8v = %8v | b/p = %v",
 				last.recvCount, ac.recvCount, rc,
 				last.recvBytes, ac.recvBytes, rb,
 				bp)
